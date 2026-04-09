@@ -2,6 +2,15 @@
 generated_images/
 templates.json
 payload_audit.txt
+comics/
+storyboards/
+lora_texts/
+configs/
+webapp/
+sd-combinator-ext/
+.claude/
+
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -186,3 +195,28 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+generation_history.jsonl
+test_composite.json
+test_power_fantasy.py
+svg_test.py
+scenarios_extended.py
+run_template.py
+pose_cache.json
+nul
+build_verdant_vn.py
+characters.json
+config.json
+export_renpy.py
+sketch_vv.py
+sketch_fl.py
+generate_strip.py
+match_and_extract.py
+renpy_generator.py
+generate_comic.py
+storyboard.py
+assemble_comic.py
+scenario_generator.py
+generate.py
+ollama_client.py
+panel_scorer.py
+recomposite.py
