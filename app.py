@@ -25,7 +25,7 @@ from api_client import A1111Client, build_payload
 CONFIG_FILE = "config.json"
 HISTORY_FILE = "generation_history.jsonl"
 DEFAULT_CONFIG = {
-    "api_url": "http://192.168.0.238:7860/",
+    "api_url": "http://127.0.0.1:7860/",
     "lora_folder": "",
     "output_dir": "generated_images",
     "last_zone_config": "",
@@ -1319,7 +1319,7 @@ def create_app():
                 lora_folder_input = gr.Textbox(
                     label="LoRA Folder Path (local or network: \\\\server\\share\\...)",
                     value=config.get("lora_folder", ""),
-                    placeholder="e.g., C:/SD/models/Lora or \\\\192.168.0.238\\share\\Lora",
+                    placeholder="e.g., C:/SD/models/Lora or \\\\127.0.0.1\\share\\Lora",
                     scale=3
                 )
                 scan_btn = gr.Button("Scan Folder", variant="primary", scale=1)

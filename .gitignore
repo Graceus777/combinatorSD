@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+.pytest_cache/
+config.json
+configs/
+lora_texts/
+generated_images/
+generation_history.jsonl
+pose_cache*.json
+recipe.json
+*.log
+*.bak
+*.safetensors
+*.ckpt

@@ -1,0 +1,14 @@
+{
+  "positive_prompt": "full body portrait, soft studio lighting",
+  "negative_prompt": "blurry, watermark",
+  "poses": [
+    {
+      "lora": "YOUR_POSE_LORA",
+      "weight": 0.8,
+      "activation": "standing, facing the camera"
+    }
+  ],
+  "skip_keywords": [
+    "YOUR_POSE_LORA"
+  ]
+}

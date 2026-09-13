@@ -1,13 +1,13 @@
 """
 Accelerated SD character generator with img2img prompt-similarity cache.
-Uses 7 pose LoRAs cycling - after first pass, same poses get img2img acceleration.
+Cycles through a supplied local pose recipe; cached poses seed later img2img calls.
 
 Usage:
-  python generate_accel.py              # all chars, auto-accelerated
-  python generate_accel.py -n 40        # 40 random chars
+  python generate_accel.py --recipe recipe.json
+  python generate_accel.py --recipe recipe.json -n 40
   python generate_accel.py --list
 """
-import sys, os, json, time, random, re, argparse, base64, io
+import sys, os, json, time, random, re, argparse, base64, io, hashlib, math
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -20,44 +20,30 @@ from PIL import Image
 LORA_TEXTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lora_texts")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pose_cache.json")
 
-BASE_POS = "masterpiece, best quality, sharp focus, highres, absurdres, detailed skin, detailed face, lazynsfw, lazypos"
-BASE_NEG = "(low quality, worst quality:1.4), blurry, deformed, bad anatomy, bad hands, extra fingers, missing fingers, text, watermark, signature, username, lazyneg"
+def load_recipe(path):
+    """Read a local recipe without embedding private model/prompt presets."""
+    with open(path, encoding="utf-8-sig") as handle:
+        recipe = json.load(handle)
+    if not isinstance(recipe, dict):
+        raise ValueError("recipe must be a JSON object")
+    poses = recipe.get("poses")
+    if not isinstance(poses, list) or not poses:
+        raise ValueError("recipe requires a nonempty poses list")
+    for pose in poses:
+        if not isinstance(pose, dict) or not isinstance(pose.get("lora"), str) or not pose["lora"].strip():
+            raise ValueError("each pose requires a LoRA name")
+        try:
+            weight = float(pose.get("weight", 0.8))
+        except (TypeError, ValueError) as error:
+            raise ValueError("pose weight must be a number") from error
+        if not math.isfinite(weight):
+            raise ValueError("pose weight must be finite")
+        if not isinstance(pose.get("activation", ""), str):
+            raise ValueError("pose activation must be a string")
+    if not isinstance(recipe.get("skip_keywords", []), list) or not all(isinstance(k, str) for k in recipe.get("skip_keywords", [])):
+        raise ValueError("skip_keywords must be a list")
+    return recipe
 
-# ── 7 pose LoRAs with activation tags ──────────────────────────────────────
-POSE_LORAS = [
-    ("multiview_oralsex", 0.8, "multi_oralsex, oral, fellatio, hetero, uncensored, pov, looking at viewer, nude"),
-    ("top-down_doggystyle_v0.2-pony", 0.8, "top-down bottom-up, from behind, ass, doggystyle, hetero, sex, solo focus, nude, sweat"),
-    ("doggystyle-asphyxiation-v2-illustriousxl-lora-nochekaiser", 0.8, "doggystyle asphyxiation, standing, hetero, sex, cum, sex from behind, teeth, sweat"),
-    ("multiple_male_masturbation", 0.9, "multiple_male_masturbation, cum, uncensored, penis, nude, multiple boys, hetero, bukkake, cum on body, group sex, facial, gangbang, ejaculation, cum on hair, looking at viewer"),
-    ("Face_Fuck_ILL", 0.8, "face fuck, oral, fellatio, hetero, lying, on back, testicles, deepthroat, pov"),
-    ("implied_fellatio_v0.1-pony", 0.8, "implied fellatio, hetero, ass, 1girl, 1boy, oral, from behind, hand on anothers head, kneeling, nude"),
-    ("nigiri-usagi-itsumo-doori-no-natsuyasumi-illustriousxl-lora-nochekaiser", 0.8, "nigiri usagi itsumo doori no natsuyasumi, 1boy, hetero, 1girl, oral, fellatio, blush, pubic hair, nude, deepthroat, irrumatio, trembling, head grab, from side"),
-]
-
-# ── skip list for character discovery ──────────────────────────────────────
-SKIP_KEYWORDS = [
-    'multiview_oralsex', 'top-down_doggystyle', 'doggystyle-asphyxiation',
-    'multiple_male_masturbation', 'Face_Fuck_ILL', 'implied_fellatio',
-    'nigiri-usagi', 'spitroast', 'pronebone', 'reversefellatio',
-    'stealthfellatio', 'standing_doggy', 'afteroral', 'bathingtogether',
-    'behind_hug', 'doggystyle facing', 'doublepenetration', 'male_masturbation',
-    'Defeatspitroast', 'offscreensex', 'POV_Thighjob', 'Pov_Blowjob',
-    'Small_Dom', 'Rough_Sex', 'arched back orgasm', 'cross-section',
-    'xray', 'excessivecum', 'bsa_cum', 'closedmouthfullofcum', 'Concept_Cum',
-    'BallsDeep', 'Ass to mouth', 'Glory_Hole', 'worship_thigh', 'shiupside',
-    'Dogeza', 'holding_leash', 'dogcollar', 'Penis_on_Head', 'Freaky_dicks',
-    'see-through-silhouette', 'monster-energy', 'breasts-against-glass',
-    'Big_mouths', 'Detailed_Soles', 'Femenine_body', 'AddMicroDetails',
-    'LeagueOfLegendsIL', 'The_Look', 'DetailedEyes', 'KMS_BLCKED',
-    'checkpoint-', 'illustrious_masterpieces', 'anime_screencap', 'romanticred',
-    '90sGrunge', 'Real_Beauty', 'DetailerIL', 'kinhey', 'Vore',
-    'masterpiece', 'dramatic lighting', 'age_slider', 'thick_thighs',
-]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Pose-based Cache (simpler than full prompt similarity - just match pose index)
-# ═══════════════════════════════════════════════════════════════════════════
 
 class PoseCache:
     """Cache that stores one image per pose index for img2img reuse."""
@@ -164,23 +150,23 @@ def generate_img2img(client: A1111Client, payload: Dict, init_path: str,
 # Character discovery
 # ═══════════════════════════════════════════════════════════════════════════
 
-def discover_characters():
+def discover_characters(lora_texts_dir=LORA_TEXTS_DIR, skip_keywords=()):
     chars = []
-    if not os.path.isdir(LORA_TEXTS_DIR):
+    if not os.path.isdir(lora_texts_dir):
         return chars
-    for fname in os.listdir(LORA_TEXTS_DIR):
+    for fname in os.listdir(lora_texts_dir):
         if not fname.endswith(".json"):
             continue
         lora_name = fname[:-5]
-        if any(kw.lower() in lora_name.lower() for kw in SKIP_KEYWORDS):
+        if any(kw.lower() in lora_name.lower() for kw in skip_keywords):
             continue
         try:
-            with open(os.path.join(LORA_TEXTS_DIR, fname), "r", encoding="utf-8") as f:
+            with open(os.path.join(lora_texts_dir, fname), "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             continue
         act = data.get("activation text", "").strip()
-        if len(act) < 25:
+        if not act:
             continue
         weight = data.get("preferred weight", 0)
         if weight <= 0:
@@ -194,7 +180,10 @@ def discover_characters():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run(args):
-    chars = discover_characters()
+    recipe = load_recipe(args.recipe) if args.recipe else None
+    if not args.list and recipe is None:
+        raise ValueError("--recipe is required for generation; see recipe.example.json")
+    chars = discover_characters(args.lora_texts, (recipe or {}).get("skip_keywords", []))
 
     if args.list:
         print(f"Discovered {len(chars)} character LoRAs:")
@@ -216,11 +205,15 @@ def run(args):
         print(f"API connection failed: {msg_conn}")
         return
 
-    cache = PoseCache()
+    poses = recipe["poses"]
+    recipe_hash = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()[:16]
+    cache_path = os.path.join(args.output, f"pose_cache_{recipe_hash}.json")
+    os.makedirs(args.output, exist_ok=True)
+    cache = PoseCache(cache_path)
     removed = cache.validate()
 
     print(f"Generating {n} characters x {args.batch} = {n * args.batch} images", flush=True)
-    print(f"Cycling through {len(POSE_LORAS)} pose LoRAs", flush=True)
+    print(f"Cycling through {len(poses)} pose LoRAs", flush=True)
     print(f"Resolution: {args.width}x{args.height}, denoise for accel: {args.denoise}", flush=True)
     print(f"Cache: {len(cache.entries)} poses cached ({removed} stale removed)", flush=True)
     print("", flush=True)
@@ -228,16 +221,17 @@ def run(args):
     accel_hits, accel_misses = 0, 0
 
     for i, char in enumerate(chars):
-        pose_idx = i % len(POSE_LORAS)
-        pose_name, pose_weight, pose_tags = POSE_LORAS[pose_idx]
+        pose_idx = i % len(poses)
+        pose = poses[pose_idx]
+        pose_name, pose_weight, pose_tags = pose["lora"], float(pose.get("weight", 0.8)), pose.get("activation", "")
 
         char_lora = f"<lora:{char['lora']}:{char['weight']}>"
         pose_lora = f"<lora:{pose_name}:{pose_weight}>"
-        prompt = f"{char_lora}, {pose_lora}, {char['activation']}, {pose_tags}, {BASE_POS}"
+        prompt = f"{char_lora}, {pose_lora}, {char['activation']}, {pose_tags}, {recipe.get('positive_prompt', '')}"
         tag = char["lora"].replace(" ", "_")[:25]
 
         payload = build_payload(
-            prompt=prompt, negative_prompt=BASE_NEG,
+            prompt=prompt, negative_prompt=recipe.get('negative_prompt', ''),
             steps=args.steps, sampler_name=args.sampler, cfg_scale=args.cfg,
             width=args.width, height=args.height,
             enable_hr=False, enable_adetailer=args.adetailer,
@@ -284,10 +278,15 @@ if __name__ == "__main__":
     p.add_argument("--steps", type=int, default=27)
     p.add_argument("--cfg", type=float, default=6.0)
     p.add_argument("--sampler", default="Euler a")
-    p.add_argument("--adetailer", action="store_true", default=True)
+    p.add_argument("--adetailer", action="store_true", default=False)
     p.add_argument("--denoise", type=float, default=0.8, help="Denoising strength for img2img accel (pose-only, needs high denoise)")
     p.add_argument("--cooldown", type=float, default=2.0)
-    p.add_argument("--api", default="http://192.168.0.238:7860")
+    p.add_argument("--api", default="http://127.0.0.1:7860")
     p.add_argument("--output", "-o", default="generated_images")
     p.add_argument("--list", action="store_true", help="List discovered characters")
-    run(p.parse_args())
+    p.add_argument("--recipe", help="Local recipe JSON; required unless --list")
+    p.add_argument("--lora-texts", default=LORA_TEXTS_DIR, help="Character sidecar directory")
+    try:
+        run(p.parse_args())
+    except (ValueError, OSError) as error:
+        p.error(str(error))
